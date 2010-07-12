@@ -55,8 +55,16 @@ class kestrel_roster(base.base_plugin):
                         'away': 'Queued',
                         'dnd': 'Cancelled',
                         'xa': 'Finished'}
+       
+            job_id = self.backend.jobs.get_id(jid)
+            status = self.backend.jobs.status(job_id) if job_id is not None else False
+            if status:
+                status_display = ': (%(requested)s) %(queued)s/%(running)s/%(completed)s' % status
+            else:
+                status_display = ''
+           
             logging.info("ROSTER: Send presence for %s to %s." % (jid, to_jid))
-            self.xmpp.sendPresence(pfrom=jid, pto=to_jid, pshow=state, pstatus=comments[state])
+            self.xmpp.sendPresence(pfrom=jid, pto=to_jid, pshow=state, pstatus=comments[state]+status_display)
             if probe:
                 self.xmpp.sendPresence(pfrom=jid, pto=to_jid, ptype='probe')
 
@@ -98,8 +106,7 @@ class kestrel_roster(base.base_plugin):
     def subscribed(self, presence):
         logging.info("ROSTER: Subsribed %s to %s" % (presence['from'], presence['to']))
         self.backend.roster.subscribed(presence['to'].bare, presence['from'].bare)
-        state = self.backend.roster.state(presence['to'].bare)
-        self.xmpp.sendPresence(pto=presence['from'], pfrom=presence['to'], pshow=state)
+        self.sendPresence(presence['to'].bare)
 
     def unsubscribe(self, presence):
         logging.info("ROSTER: Unsubscribe %s from %s" % (presence['to'], presence['from']))

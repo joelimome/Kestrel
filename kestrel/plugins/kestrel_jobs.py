@@ -112,7 +112,9 @@ class kestrel_jobs(base.base_plugin):
     def cancel_job_iq(self, iq):
         job = iq['kestrel_job']
         if self._cancel_job(iq['from'], job['id']):
-            self.xmpp.sendPresence(pto=iq['from'].bare, pfrom=iq['to'], pstatus='Cancelled', pshow='xa')
+            status = self.backend.jobs.status(job['id'])
+            status_display = 'Cancelled: %(requested) %(queued)s/%(running)s/%(completed)s' % status 
+            self.xmpp.sendPresence(pto=iq['from'].bare, pfrom=iq['to'], pstatus=status_display, pshow='xa')
             iq.reply()
             iq['kestrel_job']['id'] = job['id']
             iq['kestrel_job']['status'] = 'cancelled'
@@ -146,7 +148,7 @@ class kestrel_jobs(base.base_plugin):
     def queue_job(self, iq):
         job = iq['kestrel_job']
         job_id = self.backend.jobs.queue(iq['from'].bare,
-                                         job['command'],
+                                         command=job['command'],
                                          cleanup=job['cleanup'],
                                          queue=job['queue'],
                                          requires=job['requirements'])

@@ -4,6 +4,7 @@ import threading
 from database import *
 
 class Backend(object):
+
     def __init__(self, db, xmpp):
         self.xmpp = xmpp
         self.db = db.session()
@@ -33,14 +34,30 @@ class Backend(object):
         self.queue.put((out, pointer, args))
         return out.get(block=True)
 
+    def update(self, obj):
+        self.db.merge(obj)
+        self.db.commit()
+
+    def save(self, obj):
+        self.db.add(obj)
+        self.db.commit()
+
 # ######################################################################
 
-class RosterBackend(object):
+class BaseBackend(object):
 
     def __init__(self, backend):
         self.backend = backend
         self.db = self.backend.db
         self.query = self.backend.query
+        self.update = self.backend.update
+        self.save = self.backend.save
+        self.xmpp = self.backend.xmpp
+        self.event = self.xmpp.event
+
+# ######################################################################
+
+class RosterBackend(BaseBackend):
 
     # ------------------------------------------------------------------
 
@@ -68,15 +85,17 @@ class RosterBackend(object):
         return self.query(self._state, (owner,))
 
     def _state(self, owner):
-        item = self.db.query(RosterItem.show).filter_by(owner=owner).all()
-        self.db.commit()
-        if item:
-            return item[0][0]
+        item = self.db.query(RosterItem.show).filter_by(owner=owner).first()
+        if item is not None:
+            self.db.commit()
+            if item:
+                return item[0]
         return None
 
     # ------------------------------------------------------------------
 
     def set_state(self, owner, state):
+        logging.warning("DEPRECATED: roster.set_state")
         return self.query(self._set_state, (owner, state))
 
     def _set_state(self, owner, state):
@@ -144,10 +163,11 @@ class RosterBackend(object):
         return self.query(self._subscribe, (owner, jid))
 
     def _subscribe(self, owner, jid):
-        entry = RosterItem(owner, jid)
+        entry = RosterItem()
+        entry.owner = owner
+        entry.jid = jid
         entry.subscribe()
-        self.db.merge(entry)
-        self.db.commit()
+        self.update(entry)
 
     # ------------------------------------------------------------------
 
@@ -155,10 +175,11 @@ class RosterBackend(object):
         return self.query(self._subscribed, (owner, jid))
 
     def _subscribed(self, owner, jid):
-        entry = RosterItem(owner, jid)
+        entry = RosterItem()
+        entry.owner = owner
+        entry.jid = jid
         entry.subscribed()
-        self.db.merge(entry)
-        self.db.commit()
+        self.update(entry)
 
     # ------------------------------------------------------------------
 
@@ -166,10 +187,11 @@ class RosterBackend(object):
         return self.query(self._unsubscribe, (owner, jid))
 
     def _unsubscribe(self, owner, jid):
-        entry = RosterItem(owner, jid)
+        entry = RosterItem()
+        entry.owner = owner
+        entry.jid = jid
         entry.unsubscribe()
-        self.db.merge(entry)
-        self.db.commit()
+        self.update(entry)
 
     # ------------------------------------------------------------------
 
@@ -177,19 +199,15 @@ class RosterBackend(object):
         return self.query(self._unsubscribed, (owner, jid))
 
     def _unsubscribed(self, owner, jid):
-        entry = RosterItem(owner, jid)
+        entry = RosterItem()
+        entry.owner = owner
+        entry.jid = jid
         entry.unsubscribed()
-        self.db.merge(entry)
-        self.db.commit()
+        self.update(entry)
 
 # ######################################################################
 
-class WorkerBackend(object):
-
-    def __init__(self, backend):
-        self.backend = backend
-        self.db = self.backend.db
-        self.query = self.backend.query
+class WorkerBackend(BaseBackend):
 
     # ------------------------------------------------------------------
 
@@ -209,9 +227,12 @@ class WorkerBackend(object):
         return self.query(self._add, (jid, capabilities))
 
     def _add(self, jid, capabilities):
-        worker = Worker(jid, capabilities, state='offline')
-        self.db.merge(worker)
-        self.db.commit()
+        worker = Worker()
+        worker.jid = jid
+        worker.provides(capabilities)
+        self.update(worker)
+        worker.set_state('offline')
+        self.update(worker)
 
     # ------------------------------------------------------------------
 
@@ -220,13 +241,9 @@ class WorkerBackend(object):
 
     def _set_state(self, jid, state):
         worker = self.db.query(Worker).filter_by(jid=jid).one()
-        if worker.state == state:
-            self.db.commit()
-            return False
-        worker.state = state
-        self.db.merge(worker)
-        self.db.commit()
-        return True
+        result = worker.set_state(state)
+        self.update(worker)
+        return result
 
     # ------------------------------------------------------------------
 
@@ -262,17 +279,16 @@ class WorkerBackend(object):
                      Worker.capabilities.like(Job.requirements),
                      Worker.jid==worker_jid,
                      Worker.state=='available')
-        job = self.db.query(Job).join((Worker, Worker.jid==worker_jid)).filter(where).first()
-        if job is None:
-            return False
-        task = self.db.query(Task).filter_by(job_id=job.id, status='queued').first()
-        if task is None:
-            return False
-        task.worker = worker
-        task.status = 'pending'
-        self.db.merge(task)
-        self.db.commit()
-        return task
+        jobs = self.db.query(Job).join((Worker, Worker.jid==worker_jid)).filter(where).all()
+        for job in jobs:
+            task = self.db.query(Task).filter_by(job_id=job.id, status='queued').first()
+            if task is None:
+                continue
+            task.pending(worker)
+            self.db.merge(task)
+            self.db.commit()
+            return task
+        return False
 
     # ------------------------------------------------------------------
 
@@ -280,25 +296,42 @@ class WorkerBackend(object):
         return self.query(self._reset, (worker_jid,))
 
     def _reset(self, worker_jid):
-        tasks = self.db.query(Task).filter_by(worker_id=worker_jid).all()
-        jobs = set()
-        for task in tasks:
-            task.reset()
-            task.worker_id = None
-            jobs.add(task.job_id)
-            self.db.merge(task)
-        self.db.commit()
-        return jobs
+        worker = self.db.query(Worker).filter_by(jid=worker_jid).one()
+        jobs = worker.offline()
+        self.update(worker)
+        for job in jobs:
+            self.event('kestrel_broadcast_presence', job.jid)
+        return [job.id for job in jobs]
 
 
 # ######################################################################
 
-class JobBackend(object):
+class JobBackend(BaseBackend):
 
-    def __init__(self, backend):
-        self.backend = backend
-        self.db = self.backend.db
-        self.query = self.backend.query
+    def active_jobs(self):
+        return self.db.query(Job).filter(and_(Job.status!='completed',
+                                              Job.status!='cancelled')).all()
+
+    def finished_jobs(self):
+        return self.db.query(Job).filter(and_(Job.status=='completed',
+                                              Job.status=='cancelled')).all()
+
+    def running_jobs(self):
+        return self.db.query(Job).filter_by(status='running').all()
+
+    def queued_jobs(self):
+        return self.db.query(Job).filter_by(status='queued').all()
+
+    def job(self, job_id, owner=None):
+        where = or_(Job.id==job_id, Job.jid==job_id)
+        if owner is not None:
+            where = and_(where, Job.owner==owner)
+        
+        try:
+            return self.db.query(Job).filter(where).one()
+        except:
+            logging.warning("Job %s not found." % job_id)
+            return None
 
     # ------------------------------------------------------------------
 
@@ -308,78 +341,54 @@ class JobBackend(object):
     def _status(self, job_id=None):
         if job_id is None:
             statuses = {}
-            jobs = self.db.query(Job).filter(and_(Job.status!='completed',
-                                                  Job.status!='cancelled')).all()
-            for job in jobs:
-                status = self._job_status(job.id)
-                if status:
-                    statuses[job.id] = status
+            for job in self.active_jobs():
+                statuses[job.id] = job.summary()
             return statuses
         else:
-            return self._job_status(job_id)
-
-    def _job_status(self, job_id):
-        job = self.db.query(Job).filter_by(id=job_id).first()
-        if job is None:
-            return False
-
-        requested = job.queue
-        queued = self.db.query(Task).filter_by(job_id=job_id, status='queued').count()
-        pending = self.db.query(Task).filter_by(job_id=job_id, status='pending').count()
-        running = self.db.query(Task).filter_by(job_id=job_id, status='running').count()
-        cancelling = self.db.query(Task).filter_by(job_id=job_id, status='cancelling').count()
-        cancelled = self.db.query(Task).filter_by(job_id=job_id, status='cancelled').count()
-        completed = self.db.query(Task).filter_by(job_id=job_id, status='completed').count()
-
-        return {'owner': job.owner,
-                'requested': requested,
-                'queued': queued + pending,
-                'running': running,
-                'completed': cancelling + cancelled + completed}
+            job = self.job(job_id)
+            if job is None:
+                return False
+            return job.summary()
 
     # ------------------------------------------------------------------
 
-    def queue(self, owner, command, jid=None, cleanup=None, queue=1, requires=None):
-        return self.query(self._queue, (owner, command, jid, cleanup, queue, requires))
+    def queue(self, owner, jid=None, command='', cleanup=None, queue=1, requires=None):
+        return self.query(self._queue, (owner, command, cleanup, queue, requires))
 
-    def _queue(self, owner, command, jid=None, cleanup=None, queue=1, requires=None):
-        job = Job(owner, command,
-                  jid=jid,
-                  status='queued',
-                  cleanup=cleanup,
-                  queue=queue,
-                  requires=requires)
-        self.db.add(job)
-        self.db.commit()
+    def _queue(self, owner, command, cleanup=None, queue=1, requires=None):
+        job = Job()
+        job.owner = owner
+        job.command = command
+        job.cleanup = cleanup
+        job.requires(requires)
+        self.save(job)
+        job.queue_tasks(queue)
+        job.jid = Job.convert(id=job.id, base=self.xmpp.fulljid)
+        self.update(job)
+        self.event('kestrel_broadcast_presence', job.jid)
         return job.id
 
     # ------------------------------------------------------------------
 
-    def create_jid(self, job_id, base_jid, task_id=None):
-        template = 'job_%d@%s'
-        if task_id is None:
-            return template % (job_id, base_jid)
-        else:
-            template += '/%d'
-            return template % (job_id, base_jid, task_id)
-
+    def create_jid(self, job_id, base_jid, task_id=''):
+        return Job.convert(id=job_id, base=base_jid, task=task_id)
+        
     # ------------------------------------------------------------------
 
     def get_id(self, job_jid):
-        return job_jid[job_jid.index('job_')+4:job_jid.index('@')]
+        return Job.convert(jid=job_jid)
 
     # ------------------------------------------------------------------
 
     def set_jid(self, job_id, job_jid):
+        logging.warning("DEPRECATED: jobs.set_jid")
         return self.query(self._set_jid, (job_id, job_jid))
 
     def _set_jid(self, job_id, job_jid):
-        job = self.db.query(Job).filter_by(id=job_id).all()
-        if job:
-            job = job[0]
+        job = self.job(job_id)
+        if job is not None:
             job.jid = job_jid
-            self.db.merge(job)
-        self.db.commit()
+            self.update(job)
 
     # ------------------------------------------------------------------
 
@@ -387,25 +396,13 @@ class JobBackend(object):
         return self.query(self._cancel, (owner, job_id))
 
     def _cancel(self, owner, job_id):
-        job = self.db.query(Job).filter_by(owner=owner, id=job_id).all()
-        if job:
-            job = job[0]
-            job.status = 'cancelled'
-            self.db.merge(job)
-            self.db.commit()
-            self.backend.roster._set_state(job.jid, 'dnd')
-            tasks = []
-            for task in job.tasks:
-                if task.status == 'running' and task.worker is not None:
-                    tasks.append(task)
-                task.cancel()
-                self.db.merge(task)
-            self.db.commit()
-            if tasks:
-                return tasks
-            return True
-        self.db.commit()
-        return False
+        job = self.job(job_id, owner=owner)
+        if job is None:
+            return []
+        tasks = job.cancel()
+        self.event('kestrel_broadcast_presence', job.jid)
+        self.update(job)
+        return tasks
 
     # ------------------------------------------------------------------
 
@@ -414,29 +411,34 @@ class JobBackend(object):
 
     def _match(self, job_id):
         job = self.db.query(Job).filter_by(id=job_id).one()
-        reqs = '%'+job.requirements.replace(' ', '%') + '%'
         result = self.db.query(Worker).filter(and_(Worker.state=='available',
-                                                   Worker.capabilities.like(reqs)))
+                                                   Worker.capabilities.like(job.requirements)))
         self.db.commit()
         tasks = []
         for worker in result:
             task = self.db.query(Task).filter_by(job_id=job_id, status='queued').first()
             if task:
-                task.worker = worker
-                task.status = 'pending'
-                self.db.merge(task)
-                self.db.commit()
+                task.pending(worker)
+                self.update(task)
                 tasks.append(task)
         return tasks
         
 # ######################################################################
 
-class TaskBackend(object):
+class TaskBackend(BaseBackend):
 
-    def __init__(self, backend):
-        self.backend = backend
-        self.db = self.backend.db
-        self.query = self.backend.query
+    def task(self, job_id, task_id):
+        try:
+            return self.db.query(Task).filter_by(job_id=job_id, 
+                                                 task_id=task_id).one()
+        except:
+            logging.warning("Task (%s, %s) not found." % (job_id, task_id))
+            return None
+
+    def active_tasks(self):
+        return self.db.query(Task).filter(or_(Task.status=='running',
+                                              Task.status=='pending',
+                                              Task.status=='cancelling')).all()
 
     # ------------------------------------------------------------------
 
@@ -445,11 +447,10 @@ class TaskBackend(object):
 
     def _clean(self):
         logging.info('Cleaning tasks table')
-        tasks = self.db.query(Task).filter(or_(Task.status=='pending',
-                                               Task.status=='cancelling')).all()
-        for task in tasks:
+        tasks = self.db.query(Task).all()
+        for task in self.active_tasks():
             task.reset()
-            self.db.merge(task)
+            self.update(task)
 
     # ------------------------------------------------------------------
 
@@ -457,30 +458,28 @@ class TaskBackend(object):
         return self.query(self._finish, (job_id, task_id))
 
     def _finish(self, job_id, task_id):
-        task = self.db.query(Task).filter_by(job_id=job_id, task_id=task_id).one()
+        finished = False
+        task = self.task(job_id, task_id)
+        if task is None:
+            return False
+
         task.finish()
-        self.db.merge(task)
-        self.db.commit()
-        job = self.db.query(Job).filter_by(id=job_id).one()
-        unfinished = self.db.query(Task).filter(Task.job_id==job_id).filter(Task.status!='completed').count()
-        if unfinished == 0:
+        self.update(task)
+        job = self.backend.jobs.job(job_id)
+        if job is None:
+            return False
+
+        if job.num_queued + job.num_running == 0:
             job.complete()
-            self.db.merge(job)
-            self.db.commit()
-            self.backend.roster._set_state(job.jid, 'xa')
-            return True
-        running = self.db.query(Task).filter(Task.job_id==job_id).filter(Task.status=='running').count()
-        if running > 0:
-            job.status = 'running'
-            self.db.merge(job)
-            self.db.commit()
-            self.backend.roster._set_state(job.jid, 'chat')
+            finished = True
+        elif job.num_running > 0:
+            job.run()
         else:
-            job.status = 'queued'
-            self.db.merge(job)
-            self.db.commit()
-            self.backend.roster._set_state(job.jid, 'away')
-        return False
+            job.wait()
+
+        self.update(job)
+        self.event('kestrel_broadcast_presence', job.jid)
+        return finished
 
     # ------------------------------------------------------------------
 
@@ -488,13 +487,11 @@ class TaskBackend(object):
         return self.query(self._start, (job_id, task_id))
 
     def _start(self, job_id, task_id):
-        task = self.db.query(Task).filter_by(job_id=job_id, task_id=task_id).one()
-        task.start()
-        task.job.status = 'running'
-        self.db.merge(task)
-        self.db.merge(task.job)
-        self.db.commit()
-        self.backend.roster._set_state(task.job.jid, 'chat')
+        task = self.task(job_id, task_id)
+        if task is not None:
+            task.start()
+            self.update(task.job)
+            self.event('kestrel_broadcast_presence', task.job.jid)
 
     # ------------------------------------------------------------------
 
@@ -502,9 +499,8 @@ class TaskBackend(object):
         return self.query(self._start, (job_id, task_id))
 
     def _reset(self, job_id, task_id):
-        task = self.db.query(Task).filter_by(job_id=job_id, task_id=task_id).one()
-        task.reset()
-        self.db.merge(task)
-        self.db.commit()
-
-
+        task = self.task(job_id, task_id)
+        if task is not None:
+            task.reset()
+            self.update(task)
+            self.event('kestrel_broadcast_presence', task.job.jid)

@@ -76,6 +76,8 @@ class kestrel_dispatcher(base.base_plugin):
                 self.xmpp['kestrel_roster'].sendPresence(task.job.jid)
         if not tasks:
             logging.info('JOB: No match for job %d' % job_id)
+            job_jid = self.backend.jobs.create_jid(job_id, self.xmpp.fulljid)
+            self.xmpp['kestrel_roster'].sendPresence(job_jid)
 
     def dispatch_worker(self, worker_jid):
         task = self.backend.workers.match(worker_jid)
