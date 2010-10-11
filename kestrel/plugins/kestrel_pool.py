@@ -23,9 +23,11 @@ import subprocess
 
 import sleekxmpp
 from sleekxmpp.plugins import base
-from sleekxmpp.xmlstream.handler.callback import Callback
-from sleekxmpp.xmlstream.matcher.xpath import MatchXPath
-from sleekxmpp.xmlstream.stanzabase import ElementBase, ET, JID
+from sleekxmpp.xmlstream import JID
+from sleekxmpp.xmlstream.handler import Callback
+from sleekxmpp.xmlstream.matcher import MatchXPath
+from sleekxmpp.xmlstream.stanzabase import ElementBase, ET
+from sleekxmpp.xmlstream.stanzabase import registerStanzaPlugin
 from sleekxmpp.stanza.iq import Iq
 from sleekxmpp.stanza.roster import Roster
 
@@ -42,8 +44,8 @@ class kestrel_pool(base.base_plugin):
                      MatchXPath('{%s}iq/{%s}query' % (self.xmpp.default_ns,
                                                       Status.namespace)),
                      self.handle_status))
-        self.xmpp.stanzaPlugin(Iq, Status)
-        self.xmpp.stanzaPlugin(Status, PoolStatus)
+        registerStanzaPlugin(Iq, Status)
+        registerStanzaPlugin(Status, PoolStatus)
 
         self.xmpp.add_event_handler('got_online', self.online, threaded=True)
         self.xmpp.add_event_handler('changed_status', self.changed)

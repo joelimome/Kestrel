@@ -25,9 +25,11 @@ import subprocess
 
 import sleekxmpp
 from sleekxmpp.plugins import base
-from sleekxmpp.xmlstream.handler.callback import Callback
-from sleekxmpp.xmlstream.matcher.xpath import MatchXPath
-from sleekxmpp.xmlstream.stanzabase import ElementBase, ET, JID
+from sleekxmpp.xmlstream import JID
+from sleekxmpp.xmlstream.handler import Callback
+from sleekxmpp.xmlstream.matcher import MatchXPath
+from sleekxmpp.xmlstream.stanzabase import ElementBase, ET
+from sleekxmpp.xmlstream.stanzabase import registerStanzaPlugin
 from sleekxmpp.stanza.iq import Iq
 from sleekxmpp.plugins.xep_0030 import DiscoNode
 
@@ -43,7 +45,7 @@ class kestrel_dispatcher(base.base_plugin):
                      MatchXPath('{%s}iq/{%s}task' % (self.xmpp.default_ns,
                                                      Task.namespace)),
                      self.handle_task))
-        self.xmpp.stanzaPlugin(Iq, Task)
+        registerStanzaPlugin(Iq, Task)
 
         self.xmpp.add_event_handler('kestrel_task_cancelled', self.cancel_task)
         self.xmpp.add_event_handler('kestrel_job_queued', self.dispatch_job)
